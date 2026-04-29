@@ -1,0 +1,70 @@
+Option A — Full Docker stack (easiest)
+Starts the app, Redis, Prometheus, and Grafana together.
+
+
+cd "c:\Users\Haxor\Desktop\rate limiter"
+docker compose up -d
+Service	URL
+App	http://localhost:3000
+Prometheus	http://localhost:9090
+Grafana	http://localhost:3001 (admin/admin)
+Option B — Local dev (hot-reload)
+1. Install dependencies
+
+
+cd "c:\Users\Haxor\Desktop\rate limiter"
+npm install
+2. Start Redis (needs Docker)
+
+
+docker run -d --name redis -p 6379:6379 redis:7-alpine
+3. Copy the env file
+
+
+cp .env.example .env
+# leave defaults as-is for dev
+4. Start the server
+
+
+npm run dev
+Server starts at http://localhost:3000 with hot-reload on file saves.
+
+Try the endpoints
+
+# Public — Fixed Window (100 req/min per IP)
+curl http://localhost:3000/public
+
+# Protected — Sliding Window (30 req/min per user+IP)
+curl -H "x-user-id: alice" http://localhost:3000/protected
+
+# Heavy — Token Bucket (burst 20, 10/min per user+tenant)
+curl -H "x-user-id: alice" -H "x-tenant-id: acme" http://localhost:3000/heavy
+
+# API — Sliding Window Counter (200 req/min per IP)
+curl http://localhost:3000/api
+
+# Health check
+curl http://localhost:3000/health
+
+# Prometheus metrics
+curl http://localhost:3000/metrics
+The response headers tell you your current quota:
+
+
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 97
+X-RateLimit-Strategy: fixed_window
+When you hit the limit you get 429 Too Many Requests with a Retry-After header.
+
+Run the benchmark
+With the server running:
+
+
+npm run benchmark
+Hammers all 4 endpoints (500 requests, 50 concurrent) and prints throughput + latency percentiles.
+
+Run the tests
+
+npm test              # all tests
+npm run test:unit     # unit only (no Redis needed)
+npm run test:coverage # with coverage report

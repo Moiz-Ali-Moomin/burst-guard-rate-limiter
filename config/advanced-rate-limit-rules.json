@@ -1,0 +1,47 @@
+{
+  "rules": [
+    {
+      "path": "/api",
+      "method": "ALL",
+      "rules": [
+        {
+          "strategy": "hierarchical",
+          "windowMs": 60000,
+          "limit": 1000,
+          "priority": 1,
+          "keyBy": ["tenant"],
+          "conditions": []
+        },
+        {
+          "strategy": "time_based",
+          "windowMs": 60000,
+          "limit": 100,
+          "priority": 2,
+          "keyBy": ["user"],
+          "conditions": []
+        }
+      ]
+    },
+    {
+      "path": "/api/users",
+      "method": "GET",
+      "rules": [
+        {
+          "strategy": "time_based",
+          "windowMs": 3600000,
+          "limit": 1000,
+          "priority": 1,
+          "keyBy": ["ip"],
+          "timeBasedRules": [
+            {
+              "startTime": "09:00",
+              "endTime": "17:00",
+              "limitMultiplier": 2.0,
+              "daysOfWeek": [1, 2, 3, 4, 5]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

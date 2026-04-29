@@ -1,0 +1,179 @@
+version: '3.9'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: rate-limiter-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rate-limiter-app
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_MODE: standalone
+      REDIS_CONNECT_TIMEOUT: 5000
+      REDIS_COMMAND_TIMEOUT: 1000
+      RATE_LIMITER_FALLBACK: 'true'
+      RATE_LIMITER_KEY_PREFIX: rl
+      # JWT_SECRET: changeme  # uncomment and set for production
+      # JWT_JWKS_URI: https://your-idp/.well-known/jwks.json  # for RS256
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: rate-limiter-prometheus
+    ports:
+      - '9090:9090'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.enable-lifecycle'
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: rate-limiter-grafana
+    ports:
+      - '3001:3000'
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/rate-limiter.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # ── Redis Cluster profile (3 masters, no replicas) ──────────────────────────
+  # Usage: docker compose --profile cluster up -d
+  redis-cluster-1:
+    image: redis:7-alpine
+    profiles: [cluster]
+    container_name: rate-limiter-redis-cluster-1
+    command: >
+      redis-server
+        --port 7001
+        --cluster-enabled yes
+        --cluster-config-file /data/nodes.conf
+        --cluster-node-timeout 5000
+        --appendonly yes
+    ports:
+      - '7001:7001'
+    volumes:
+      - redis-cluster-1-data:/data
+    networks:
+      cluster-net:
+        ipv4_address: 172.28.0.11
+
+  redis-cluster-2:
+    image: redis:7-alpine
+    profiles: [cluster]
+    container_name: rate-limiter-redis-cluster-2
+    command: >
+      redis-server
+        --port 7002
+        --cluster-enabled yes
+        --cluster-config-file /data/nodes.conf
+        --cluster-node-timeout 5000
+        --appendonly yes
+    ports:
+      - '7002:7002'
+    volumes:
+      - redis-cluster-2-data:/data
+    networks:
+      cluster-net:
+        ipv4_address: 172.28.0.12
+
+  redis-cluster-3:
+    image: redis:7-alpine
+    profiles: [cluster]
+    container_name: rate-limiter-redis-cluster-3
+    command: >
+      redis-server
+        --port 7003
+        --cluster-enabled yes
+        --cluster-config-file /data/nodes.conf
+        --cluster-node-timeout 5000
+        --appendonly yes
+    ports:
+      - '7003:7003'
+    volumes:
+      - redis-cluster-3-data:/data
+    networks:
+      cluster-net:
+        ipv4_address: 172.28.0.13
+
+  redis-cluster-init:
+    image: redis:7-alpine
+    profiles: [cluster]
+    container_name: rate-limiter-redis-cluster-init
+    depends_on:
+      - redis-cluster-1
+      - redis-cluster-2
+      - redis-cluster-3
+    networks:
+      - cluster-net
+    # Wait for all nodes to start, then create the cluster
+    command: >
+      sh -c "
+        sleep 3 &&
+        redis-cli --cluster create
+          172.28.0.11:7001 172.28.0.12:7002 172.28.0.13:7003
+          --cluster-replicas 0 --cluster-yes
+      "
+    restart: on-failure
+
+volumes:
+  redis-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  redis-cluster-1-data:
+    driver: local
+  redis-cluster-2-data:
+    driver: local
+  redis-cluster-3-data:
+    driver: local
+
+networks:
+  cluster-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

@@ -1,0 +1,113 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: rate-limiter
+    folder: Rate Limiter
+    interval: 1m
+    rules:
+      - uid: rate-limiter-block-rate-high
+        title: High Block Rate (>20%)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: >-
+                100 * sum by (strategy) (rate(rate_limiter_blocked_total[5m]))
+                / sum by (strategy) (rate(rate_limiter_requests_total[5m]))
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              conditions:
+                - evaluator:
+                    params: [20]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              hide: false
+              refId: C
+              type: threshold
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "Block rate above 20% for strategy {{ $labels.strategy }}"
+          description: >-
+            The rate limiter is blocking more than 20% of requests for strategy
+            {{ $labels.strategy }}. Current value: {{ $values.A }}%.
+            This may indicate a misconfigured limit or a traffic spike.
+        labels:
+          severity: warning
+          team: platform
+
+      - uid: rate-limiter-redis-down
+        title: Redis Unavailable
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: rate_limiter_redis_available
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              conditions:
+                - evaluator:
+                    params: [1]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              hide: false
+              refId: C
+              type: threshold
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 1m
+        annotations:
+          summary: "Redis is down — rate limiter operating in fallback mode"
+          description: >-
+            The rate_limiter_redis_available gauge has dropped to 0.
+            The service is failing open (requests are being allowed through)
+            until Redis recovers. Investigate Redis connectivity immediately.
+        labels:
+          severity: critical
+          team: platform
