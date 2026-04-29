@@ -15,11 +15,11 @@ A production-grade, horizontally scalable rate limiting service built with **Nod
 7. [Resilience & Failure Scenarios](#resilience--failure-scenarios)
 8. [Scaling Strategy](#scaling-strategy)
 9. [When to Use Each Algorithm](#when-to-use-each-algorithm)
-10. [Advanced Features](#advanced-features)
-11. [Getting Started](#getting-started)
-12. [Running Tests](#running-tests)
-13. [Benchmarking](#benchmarking)
-14. [Sample curl Requests](#sample-curl-requests)
+10. [Getting Started](#getting-started)
+11. [Running Tests](#running-tests)
+12. [Benchmarking](#benchmarking)
+13. [Sample curl Requests](#sample-curl-requests)
+14. [Advanced Features](#advanced-features)
 
 ---
 
@@ -44,8 +44,6 @@ Rate limiting is a foundational reliability primitive. Without it, a single misb
 
 ---
 
----
-
 ## Architecture
 
 ```
@@ -54,8 +52,15 @@ Rate limiting is a foundational reliability primitive. Without it, a single misb
 └──────────────────────┬───────────────────────────────┘
                        │
              ┌─────────▼──────────┐
-             │  rateLimiterMiddleware │
-             │  (finds rules for path) │
+             │  jwtAuthMiddleware  │
+             │  (verifies JWT or   │
+             │   trusts x-user-id  │
+             │   headers in dev)   │
+             └─────────┬──────────┘
+                       │
+             ┌─────────▼──────────┐
+             │ rateLimiterMiddleware│
+             │  (finds rules for path)│
              └─────────┬──────────┘
                        │
              ┌─────────▼──────────┐
@@ -85,19 +90,28 @@ Rate limiting is a foundational reliability primitive. Without it, a single misb
 
 ```
 src/
+├── app.ts                    # Express app factory (middleware + routes)
+├── server.ts                 # HTTP server bootstrap
+├── index.ts                  # Library entrypoint
 ├── config/
-│   ├── index.ts              # Environment variable parsing
-│   └── rateLimitConfig.ts    # Per-endpoint rule definitions
+│   ├── index.ts                    # Environment variable parsing (envalid)
+│   ├── rateLimitConfig.ts          # Per-endpoint rule definitions
+│   └── advancedRateLimitConfig.ts  # Hierarchical / time-based policies
 ├── controllers/
-│   ├── exampleController.ts  # /public, /protected, /heavy routes
-│   ├── healthController.ts   # /health
-│   └── metricsController.ts  # /metrics (Prometheus)
+│   ├── exampleController.ts    # /public, /protected, /heavy, /api routes
+│   ├── healthController.ts     # /health
+│   ├── metricsController.ts    # /metrics (Prometheus)
+│   ├── analyticsController.ts  # /analytics/* reporting endpoints
+│   └── configController.ts     # /config-ui dynamic rule management
 ├── middleware/
+│   ├── auth.ts               # JWT verification (HS256 secret or JWKS)
 │   ├── rateLimiter.ts        # Request interception + rule lookup
 │   └── errorHandler.ts       # Global error handler
 ├── services/
 │   ├── rateLimiterService.ts # Strategy dispatch + fallback logic
-│   └── metricsService.ts     # Prometheus counter/histogram/gauge
+│   ├── metricsService.ts     # Prometheus counter/histogram/gauge
+│   ├── analytics/            # Usage tracking + reporting
+│   └── config/               # Dynamic rule loading + validation
 ├── strategies/
 │   ├── base.ts               # IRateLimitStrategy interface + types
 │   ├── fixed-window/
@@ -107,7 +121,7 @@ src/
 │   └── token-bucket/
 │       └── tokenBucketStrategy.ts
 ├── redis/
-│   ├── client.ts             # ioredis singleton + availability flag
+│   ├── client.ts             # ioredis singleton — standalone, sentinel, cluster
 │   └── luaScripts.ts         # All three Lua scripts
 └── utils/
     ├── keyBuilder.ts         # Namespaced Redis key construction
@@ -299,8 +313,6 @@ For very high throughput:
 |---------------|----------------------------------|
 | Fixed Window  | ~60 bytes (string + TTL)         |
 | Sliding Window| ~100 bytes × requests in window  |
-
----
 | Token Bucket  | ~150 bytes (hash with 2 fields)  |
 
 For 1M active sliding-window keys at 30 req/min: ~3GB. Plan capacity accordingly, or use fixed-window for memory-constrained scenarios.
@@ -358,15 +370,29 @@ npm run dev
 | Variable                  | Default       | Description                              |
 |--------------------------|---------------|------------------------------------------|
 | `PORT`                   | `3000`        | HTTP server port                         |
-| `NODE_ENV`               | `development` | `development` or `production`            |
-| `REDIS_HOST`             | `localhost`   | Redis hostname                           |
-| `REDIS_PORT`             | `6379`        | Redis port                               |
+| `NODE_ENV`               | `development` | `development`, `test`, or `production`   |
+| `REDIS_MODE`             | `standalone`  | `standalone`, `sentinel`, or `cluster`   |
+| `REDIS_HOST`             | `localhost`   | Redis hostname (standalone mode)         |
+| `REDIS_PORT`             | `6379`        | Redis port (standalone mode)             |
 | `REDIS_PASSWORD`         | —             | Redis AUTH password (if set)             |
 | `REDIS_DB`               | `0`           | Redis database index                     |
 | `REDIS_CONNECT_TIMEOUT`  | `5000`        | Connection timeout (ms)                  |
 | `REDIS_COMMAND_TIMEOUT`  | `1000`        | Per-command timeout (ms)                 |
+| `REDIS_SENTINEL_NAME`    | `mymaster`    | Sentinel master name                     |
+| `REDIS_SENTINEL_HOSTS`   | —             | CSV `host:port` list of Sentinel nodes   |
+| `REDIS_CLUSTER_NODES`    | —             | CSV `host:port` list of Cluster seed nodes |
 | `RATE_LIMITER_FALLBACK`  | `true`        | Fail-open on Redis failure               |
 | `RATE_LIMITER_KEY_PREFIX`| `rl`          | Redis key prefix                         |
+| `JWT_SECRET`             | —             | HS256 shared secret (enables JWT auth)   |
+| `JWT_ALGORITHM`          | `HS256`       | JWT signing algorithm                    |
+| `JWT_JWKS_URI`           | —             | JWKS endpoint for asymmetric verification |
+
+### Authentication
+
+The `/protected` and `/heavy` endpoints scope rate limits per user (and per tenant for `/heavy`). Identity is resolved by [src/middleware/auth.ts](src/middleware/auth.ts) in two modes:
+
+- **Dev/test mode** — when neither `JWT_SECRET` nor `JWT_JWKS_URI` is set, the middleware trusts `x-user-id` and `x-tenant-id` request headers. Convenient for local testing and CI; **never enable this in production**.
+- **JWT mode** — when `JWT_SECRET` (HS256) or `JWT_JWKS_URI` (asymmetric, e.g. RS256 from an IdP) is configured, requests must present `Authorization: Bearer <token>`. `userId` is read from `sub` (or `userId` / `user_id`); `tenantId` from `tenantId` / `tenant_id`. Requests without a token are still allowed through but treated as anonymous and rate-limited by IP only.
 
 ---
 
@@ -388,7 +414,18 @@ npm run test:coverage
 
 Unit tests mock the Redis client entirely — they verify algorithm logic, NOSCRIPT retry behavior, and header correctness without any infrastructure dependency.
 
-Integration tests mock ioredis at the module level and exercise the full HTTP stack including middleware, routing, headers, and 429 responses.
+Integration tests mock the `src/redis/client` wrapper and exercise the full HTTP stack including middleware, routing, headers, and 429 responses.
+
+### Redis Cluster integration tests
+
+[tests/integration/cluster.test.ts](tests/integration/cluster.test.ts) exercises EVALSHA, key slot distribution, and NOSCRIPT recovery against a real 3-node cluster. The suite is **skipped by default** so `npm test` does not require infrastructure. To run it:
+
+```bash
+docker compose --profile cluster up -d
+REDIS_CLUSTER_TEST=1 npx jest tests/integration/cluster.test.ts
+```
+
+`REDIS_CLUSTER_NODES` (default `127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003`) overrides the seed list.
 
 ---
 
@@ -431,6 +468,12 @@ curl -i \
   -H "x-tenant-id: acme-corp" \
   http://localhost:3000/heavy
 
+# Same endpoint when JWT_SECRET is configured — identity comes from the token
+# (sub → userId, tenantId/tenant_id claim → tenantId)
+curl -i \
+  -H "Authorization: Bearer $JWT" \
+  http://localhost:3000/heavy
+
 # Health check
 curl http://localhost:3000/health
 
@@ -459,17 +502,20 @@ curl -i -H "x-user-id: alice" http://localhost:3000/protected
 #
 # {"error":"Too Many Requests","strategy":"sliding_window","retryAfterMs":42000,"retryAfterSeconds":42}
 ```
+
+---
+
 ## Advanced Features
 
-This rate limiter now includes several advanced features that make it more flexible and powerful for production use.
+Beyond the three core algorithms, the service ships with several capabilities for production use.
 
 ### Dynamic Configuration
 
-The system supports loading rate limiting rules from external JSON files, allowing you to modify rules without restarting the service. Configuration files are automatically reloaded when they change.
+Rate limiting rules can be loaded from external JSON files and reloaded without restarting the service. See [src/services/config/](src/services/config/) and the management endpoints exposed by [src/controllers/configController.ts](src/controllers/configController.ts).
 
 ### Analytics and Reporting
 
-Built-in analytics track rate limiting usage patterns and provide insights for optimization:
+Usage is tracked by [src/services/analytics/](src/services/analytics/) and exposed via [src/controllers/analyticsController.ts](src/controllers/analyticsController.ts):
 
 - Request volume tracking
 - Allowed vs blocked requests
@@ -483,38 +529,12 @@ A web UI at `/config-ui` allows administrators to manage rate limiting rules wit
 
 ### Sophisticated Rate Limiting Policies
 
-Advanced rate limiting strategies include:
+Advanced policies in [src/config/advancedRateLimitConfig.ts](src/config/advancedRateLimitConfig.ts):
 
-- **Hierarchical Rate Limiting**: Parent-child relationships for complex rate limiting scenarios
-- **Time-Based Rate Limiting**: Different limits at different times of day or week
-- **Adaptive Rate Limiting**: Limits that adjust based on usage patterns
-
-### Configuration Validation
-
-The system validates all configurations to ensure they are consistent and well-formed before applying them.
-
-### Analytics and Reporting
-
-Built-in analytics track rate limiting usage patterns and provide insights for optimization:
-
-- Request volume tracking
-- Allowed vs blocked requests
-- Top paths and users
-- Strategy effectiveness
-- Time-based usage patterns
-
-### Web-based Configuration Interface
-
-A web UI at `/config-ui` allows administrators to manage rate limiting rules without code changes.
-
-### Sophisticated Rate Limiting Policies
-
-Advanced rate limiting strategies include:
-
-- **Hierarchical Rate Limiting**: Parent-child relationships for complex rate limiting scenarios
-- **Time-Based Rate Limiting**: Different limits at different times of day or week
-- **Adaptive Rate Limiting**: Limits that adjust based on usage patterns
+- **Hierarchical Rate Limiting** — parent/child relationships for nested quotas
+- **Time-Based Rate Limiting** — different limits at different times of day or week
+- **Adaptive Rate Limiting** — limits that adjust based on observed usage patterns
 
 ### Configuration Validation
 
-The system validates all configurations to ensure they are consistent and well-formed before applying them.
+All configurations are validated for consistency and well-formedness before they are applied.
