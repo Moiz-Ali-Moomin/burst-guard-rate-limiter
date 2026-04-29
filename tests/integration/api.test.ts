@@ -40,6 +40,13 @@ jest.mock('pino-http', () => (_options: any) => (_req: any, _res: any, next: any
 let app: Application;
 
 beforeAll(() => {
+  // Force the auth middleware into "trust custom headers" mode so the
+  // x-user-id / x-tenant-id headers used by these tests are honored.
+  // CI sets JWT_SECRET=test-secret, which would otherwise route requests
+  // through JWT verification and drop the test headers.
+  delete process.env.JWT_SECRET;
+  delete process.env.JWT_JWKS_URI;
+  jest.resetModules();
   const { createApp } = require('../../src/app');
   app = createApp();
 });
